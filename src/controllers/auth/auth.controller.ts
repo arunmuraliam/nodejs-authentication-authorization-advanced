@@ -4,7 +4,7 @@ import { User } from "../../models/user.model";
 import { comparePassword, hashPassword } from "../../lib/hash";
 import jwt from "jsonwebtoken";
 import { sendVerificationEmail } from "../../lib/email";
-import { createAccessToken, createRefreshToken } from "../../lib/token";
+import { createAccessToken, createRefreshToken, verifyRefreshToken } from "../../lib/token";
 
 
 function getAppUrl() {
@@ -48,7 +48,7 @@ export async function registerHandler(req: Request, res: Response) {
 
 export async function verifyEmailHandler(req: Request, res: Response) {
     try {
-        const token  = req.query.token as string | undefined;
+        const token = req.query.token as string | undefined;
         if (!token || typeof token !== "string") {
             return res.status(400).json({ message: "Invalid token" });
         }
@@ -58,7 +58,7 @@ export async function verifyEmailHandler(req: Request, res: Response) {
         if (!user) {
             return res.status(400).json({ message: "Invalid token" });
         }
-        if(user.isEmailVerified) {
+        if (user.isEmailVerified) {
             return res.status(400).json({ message: "Email already verified" });
         }
         user.isEmailVerified = true;
@@ -86,7 +86,7 @@ export async function loginHandler(req: Request, res: Response) {
         if (!isPasswordValid) {
             return res.status(403).json({ message: "Invalid email or password" });
         }
-        if(!user.isEmailVerified){
+        if (!user.isEmailVerified) {
             return res.status(400).json({ message: "User email is not verified. Please verify before logging in." });
         }
         const accessToken = createAccessToken(user.id, user.role, user.tokenVersion);
@@ -99,4 +99,48 @@ export async function loginHandler(req: Request, res: Response) {
         console.error("Error logging in", error);
         return res.status(500).json({ message: "Internal server error" });
     }
+}
+
+export async function refreshHandler(req: Request, res: Response) {
+    try {
+        const token = req.cookies?.refreshToken as string | undefined;
+
+        if (!token) {
+            return res.status(401).json({ message: "Refresh token missing" });
+        }
+
+        const payload = verifyRefreshToken(token);
+
+        const user = await User.findById(payload.sub);
+
+        if (!user) {
+            return res.status(401).json({ message: "User not found" });
+        }
+
+        if (user.tokenVersion !== payload.tokenVersion) {
+            return res.status(401).json({ message: "Refresh token invalidated" });
+        }
+
+        const newAccessToken = createAccessToken(
+            user.id,
+            user.role,
+            user.tokenVersion
+        );
+        const newRefreshToken = createRefreshToken(user.id, user.tokenVersion);
+
+        const isProd = process.env.NODE_ENV === "production";
+        res.cookie("refreshToken", newRefreshToken, { httpOnly: true, secure: isProd, maxAge: 7 * 24 * 60 * 60 * 1000 });
+        return res.status(200).json({ message: "Token Refreshed", accessToken: newAccessToken, user: { id: user.id, name: user.name, email: user.email, role: user.role, isEmailVerified: user.isEmailVerified, twoFactorEnabled: user.twoFactorEnabled } });
+    } catch (error) {
+        console.error("Error in getting refresh token", error);
+        return res.status(500).json({ message: "Internal server error" });
+    }
+}
+
+export async function logoutHandler(req: Request, res: Response) {
+    res.clearCookie("refreshToken", { path: '/' });
+
+    return res.status(200).json({
+        message: "Logged out",
+    })
 }
